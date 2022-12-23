@@ -6,7 +6,8 @@ using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using System.Net.Http;
 using System.Web;
-
+using System.Text.Json.Nodes;
+using System.Linq;
 
 namespace AirtableApiClient
 {
@@ -103,7 +104,7 @@ namespace AirtableApiClient
         {
             HttpResponseMessage response = await ListRecordsInternal(tableName, offset, fields, filterByFormula,
                 maxRecords, pageSize, sort, view,
-                cellFormat, timeZone, userLocale, 
+                cellFormat, timeZone, userLocale,
                 returnFieldsByFieldId
                 ).ConfigureAwait(false);
             AirtableApiException error = await CheckForAirtableException(response).ConfigureAwait(false);
@@ -476,63 +477,15 @@ namespace AirtableApiClient
         //----------------------------------------------------------------------------
         private Uri BuildUriForListRecords(
             string tableName,
-            string offset,
-            IEnumerable<string> fields,
-            string filterByFormula,
-            int? maxRecords,
-            int? pageSize,
-            IEnumerable<Sort> sort,
             string view,
-            string cellFormat,
             string timeZone,
-            string userLocale,
-            bool returnFieldsByFieldId)
+            string userLocale)
         {
             var uriBuilder = new UriBuilder(AIRTABLE_API_URL + BaseId + "/" + Uri.EscapeDataString(tableName));
-
-            if (!string.IsNullOrEmpty(offset))
-            {
-                AddParametersToQuery(ref uriBuilder, $"offset={HttpUtility.UrlEncode(offset)}");
-            }
-
-            if (fields != null)
-            {
-                string flattenFieldsParam = QueryParamHelper.FlattenFieldsParam(fields);
-                AddParametersToQuery(ref uriBuilder, flattenFieldsParam);
-            }
-
-            if (!string.IsNullOrEmpty(filterByFormula))
-            {
-                AddParametersToQuery(ref uriBuilder, $"filterByFormula={HttpUtility.UrlEncode(filterByFormula)}");
-            }
-
-            if (sort != null)
-            {
-                string flattenSortParam = QueryParamHelper.FlattenSortParam(sort);
-                AddParametersToQuery(ref uriBuilder, flattenSortParam);
-            }
 
             if (!string.IsNullOrEmpty(view))
             {
                 AddParametersToQuery(ref uriBuilder, $"view={HttpUtility.UrlEncode(view)}");
-            }
-
-            if (maxRecords != null)
-            {
-                if (maxRecords <= 0)
-                {
-                    throw new ArgumentException("Maximum Number of Records must be > 0", "maxRecords");
-                }
-                AddParametersToQuery(ref uriBuilder, $"maxRecords={maxRecords}");
-            }
-
-            if (pageSize != null)
-            {
-                if (pageSize <= 0 || pageSize > MAX_PAGE_SIZE)
-                {
-                    throw new ArgumentException("Page Size must be > 0 and <= 100", "pageSize");
-                }
-                AddParametersToQuery(ref uriBuilder, $"pageSize={pageSize}");
             }
 
             if (!string.IsNullOrEmpty(timeZone))
@@ -545,16 +498,101 @@ namespace AirtableApiClient
                 AddParametersToQuery(ref uriBuilder, $"userLocale={HttpUtility.UrlEncode(userLocale)}");
             }
 
-            if (!string.IsNullOrEmpty(cellFormat) && !string.IsNullOrEmpty(timeZone) && !string.IsNullOrEmpty(userLocale))
+            return uriBuilder.Uri;
+        }
+
+        //----------------------------------------------------------------------------
+        //
+        // AirtableBase.BuildBodyForListRecords
+        //
+        // Build Request Body for the List Records operation
+        //
+        //----------------------------------------------------------------------------
+        private string BuildBodyForListRecords(
+            string offset,
+            string[] fields,
+            string filterByFormula,
+            int? maxRecords,
+            int? pageSize,
+            Sort[] sort,
+            string cellFormat,
+            bool returnFieldsByFieldId)
+        {
+            var body = new JsonObject();
+            if (!string.IsNullOrEmpty(offset))
             {
-                AddParametersToQuery(ref uriBuilder, $"cellFormat={HttpUtility.UrlEncode(cellFormat)}");
+                body.Add("offset", HttpUtility.UrlEncode(offset));
+            }
+
+            if (fields != null)
+            {
+                StringBuilder fieldsSb = new StringBuilder();
+                fieldsSb.Append("[");
+                for (int i = 0; i < fields.Length; i++)
+                {
+                    fieldsSb.Append($"\"{fields[i]}\"");
+                    if (i != fields.Length - 1)
+                        fieldsSb.Append(", ");
+                }
+                fieldsSb.Append("]");
+
+                body.Add("fields", HttpUtility.UrlEncode(fieldsSb.ToString()));
+            }
+
+            if (!string.IsNullOrEmpty(filterByFormula))
+            {
+                body.Add("filterByFormula", HttpUtility.UrlEncode(filterByFormula));
+            }
+
+            if (sort != null)
+            {
+                var sortField = new JsonArray();
+                for (int i = 0; i < sort.Length; i++)
+                {
+                    var sortObj = new JsonObject
+                    {
+                        { "field", sort[i].Field },
+                        { "direction", sort[i].Direction.ToString().ToLower() }
+                    };
+
+                    sortField.Add(sortObj);
+                }
+
+                body.Add("sort", sortField);
+            }
+
+            if (maxRecords != null)
+            {
+                if (maxRecords <= 0)
+                {
+                    throw new ArgumentException("Maximum Number of Records must be > 0", "maxRecords");
+                }
+
+                body.Add("maxRecords", maxRecords);
+            }
+
+            if (pageSize != null)
+            {
+                if (pageSize <= 0 || pageSize > MAX_PAGE_SIZE)
+                {
+                    throw new ArgumentException("Page Size must be > 0 and <= 100", "pageSize");
+                }
+
+                body.Add("pageSize", pageSize);
+            }
+
+
+            if (!string.IsNullOrEmpty(cellFormat))
+            {
+                body.Add("cellFormat", HttpUtility.UrlEncode(cellFormat));
             }
 
             if (returnFieldsByFieldId != false)
             {
-                AddParametersToQuery(ref uriBuilder, $"returnFieldsByFieldId={returnFieldsByFieldId}");
+                body.Add("returnFieldsByFieldId", returnFieldsByFieldId);
             }
-            return uriBuilder.Uri;
+
+            return body.ToJsonString();
         }
 
 
@@ -832,8 +870,14 @@ namespace AirtableApiClient
                     throw new ArgumentException("Both \'timeZone\' and \'userLocal\' parameters are required when using \'string\' as \'cellFormat\'.");
                 }
             }
-            var uri = BuildUriForListRecords(tableName, offset, fields, filterByFormula, maxRecords, pageSize, sort, view, cellFormat, timeZone, userLocale, returnFieldsByFieldId);
-            var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            var uri = BuildUriForListRecords(tableName, view, timeZone, userLocale);
+            var body = BuildBodyForListRecords(offset, fields.ToArray(), filterByFormula, maxRecords, pageSize, sort.ToArray(), cellFormat, returnFieldsByFieldId);
+
+            var request = new HttpRequestMessage(HttpMethod.Post, uri)
+            {
+                Content = new StringContent(body)
+            };
+
             return (await httpClientWithRetries.SendAsync(request).ConfigureAwait(false));
         }
 
